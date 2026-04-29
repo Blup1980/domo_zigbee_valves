@@ -1,126 +1,81 @@
-| Supported Targets | ESP32-H2 | ESP32-C6 | ESP32-C5 |
-| ----------------- | -------- | -------- | -------- |
+Home Assistant Coordinator — Valve Sequencer
 
-# Light Bulb Example 
+Summary
+- This repository implements a Zigbee coordinator application that exposes 11 valves
+  (endpoints EP 11..21) as Home Assistant-friendly switches. Logical On/Off commands are
+  accepted immediately; physical actuation is sequenced to limit the number of simultaneous
+  power-hungry opens.
 
-This example demonstrates how to configure a Home Automation color dimmable light on a Zigbee Coordinator.
+Key behaviour
+- 11 valves (VALVE_COUNT = 11) mapped to endpoints 11..21.
+- Logical control: standard ZCL On/Off cluster per endpoint. Commands return success
+  immediately so Home Assistant reflects the requested state without delay.
+- Physical state: each valve reports a Multistate Input cluster PresentValue with
+  three states: 1=Closed, 2=Opening (or Pending), 3=Open. This allows Home Assistant to
+  show real physical state separate from logical On/Off.
+- Sequencing: at most VALVE_MAX_CONCURRENT_OPENING (default 4) valves may be in the
+  OPENING state concurrently. Opens beyond that are recorded as VALVE_STATE_PENDING.
+  When a slot frees, the driver picks the lowest-index pending valve and starts it.
 
-## Hardware Required
+Files of interest
+- main/valve_driver.h — valve driver API, GPIO placeholders (VALVE_GPIO_0..VALVE_GPIO_10)
+- main/valve_driver.c — sequencing logic, timers, per-valve state machine, ZCL reporting
+- main/coordinator_valves.c — endpoint creation, On/Off routing and Multistate Input cluster
+- test/test_valve_driver.c — Unity unit tests with deterministic timer stubs and state checks
 
-* One 802.15.4 enabled development board (e.g., ESP32-H2 or ESP32-C6) running this example.
-* A second board running as a Zigbee Router or End Device (see [color_dimmable_switch](../color_dimmable_switch/) example)
+Configuration and GPIOs
+- By default the GPIO macros VALVE_GPIO_0..VALVE_GPIO_10 are set to -1 (placeholders).
+  Replace these values in main/valve_driver.h with your board's GPIO numbers to enable
+  hardware actuation.
+- The project does not persist state across reboots — this is by design.
 
-## Configure the project
+Testing
+- Unit tests are in test/ and use Unity. They run fast and do not require hardware.
+- Tests include deterministic timer stubs so you can simulate timer expiry and validate
+  queue/pending behaviour and state transitions.
+- To enable unit tests, build with CONFIG_UNITY enabled in your sdkconfig or use the
+  provided unity-app CMake test setup.
 
-Before project configuration and build, make sure to set the correct chip target using `idf.py set-target TARGET` command.
+Design Notes
+- The driver models each valve as one of CLOSED, PENDING, OPENING, OPEN — this makes
+  reasoning about concurrency simple and avoids separate counters that can go out of sync.
+- When capacity is full, open requests set the valve to PENDING. When a slot opens the
+  driver selects the lowest-index PENDING valve and starts it (not a strict FIFO queue).
+- Multistate Input PresentValue is reported after state transitions and uses values
+  1/2/3 as listed above. PENDING maps to the "Opening" reported value so Home Assistant
+  observes activity without adding a custom numeric mapping.
 
-## Erase the NVRAM 
+State Machine (ASCII diagram)
 
-Before flash it to the board, it is recommended to erase NVRAM if user doesn't want to keep the previous examples or other projects stored info 
-using `idf.py -p PORT erase-flash`
+  Open Request                         Timer Expiry
+  -------------                        -------------
+  [CLOSED] -------(open, capacity)----> [OPENING] ----(timer expires)----> [OPEN]
+     |                                   |  ^
+     |                                   |  | Close Request
+     |                                   |  |
+     |                                   v  |
+     +--(open, no capacity)--> [PENDING] -----(close or cancel)----> [CLOSED]
 
-## Build and Flash
+Notes on transitions
+- CLOSED + open & capacity available -> OPENING: start GPIO, set timer, report PresentValue=2 (Opening).
+- CLOSED + open & capacity NOT available -> PENDING: record pending state, report PresentValue=2 (Opening/Pending).
+- OPENING + timer expiry -> OPEN: set GPIO to final open, cancel timer, report PresentValue=3 (Open).
+- OPENING + close request -> CLOSED: stop/delete timer, clear opening, possibly start lowest-index PENDING.
+- PENDING + slot becomes available -> OPENING: chosen by lowest index, start GPIO and timer, report PresentValue=2.
+- Any state + close request -> CLOSED: immediate physical close and PresentValue=1 (Closed).
 
-Build the project, flash it to the board, and start the monitor tool to view the serial output by running `idf.py -p PORT flash monitor`.
 
-(To exit the serial monitor, type ``Ctrl-]``.)
+Development
+- Build: use ESP-IDF tooling (idf.py) as usual for your target (ESP32-H2, ESP32-C6, etc.).
+- Flash: idf.py -p PORT flash monitor
+- Tests: run Unity tests in the build/test runner or add CI (recommended).
 
-## Application Functions
+Troubleshooting
+- If you see unexpected counts of OPENING valves, enable unit tests under CONFIG_UNITY and
+  run the tests — they include invariant checks to catch logic regressions.
+- If a timer callback runs after a valve was closed, the driver ignores that callback rather
+  than double-decrementing internal counters.
 
-- When the program starts, the board, acting as a Zigbee Coordinator with the `Home Automation Dimmable Light` function, will form an open network within 180 seconds.
-```
-I (412) main_task: Calling app_main()                                                                                                        
-I (432) COLOR_DIMMABLE_LIGHT: Start ESP Zigbee Stack                                                                                  
-I (432) ESP-ZIGBEE: SDK Version: v1.6.8-fcae32885b02-94cf5061*; esp32h2; 2026-04-08 12:28:23 UTC                                             
-I (432) esp zigbee sleep: light sleap disabled                                                                                               
-I (452) phy: phy_version: 323,2, a8ef10c, Aug  1 2025, 17:46:10  
-I (452) phy: libbtbb version: 4515421, Aug  1 2025, 17:46:22
-I (472) main_task: Returned from app_main()
-I (522) COLOR_DIMMABLE_LIGHT: Initialize Zigbee stack
-W (522) rmt: channel resolution loss, real=10666666
-I (522) COLOR_DIMMABLE_LIGHT: Deferred driver initialization successful                                                               
-I (532) COLOR_DIMMABLE_LIGHT: Device started up in factory-reset mode                                                                 
-I (842) COLOR_DIMMABLE_LIGHT: Formed network successfully: PAN ID(0x85ff, EXT: 0x4831b7fffec183f0), Channel(13), Short Address(0x0000) 
-I (1032) COLOR_DIMMABLE_LIGHT: Network(0x85ff) is open for 180 seconds                                                                
-I (1032) COLOR_DIMMABLE_LIGHT: Network steering completed
-I (39612) COLOR_DIMMABLE_LIGHT: Zigbee APP Signal: ZDO Device Update(type: 0x7)                                                       
-I (39702) COLOR_DIMMABLE_LIGHT: New device commissioned or rejoined(short: 0x940a)                                                    
-I (39912) COLOR_DIMMABLE_LIGHT: Zigbee APP Signal: ZDO Device Authorized(type: 0x8)                                                   
-I (39952) COLOR_DIMMABLE_LIGHT: Network(0x85ff) is open for 180 seconds  
-```
-
-- If the board receives a ZCL `MoveToLevelWithOnOff` of LevelControl command from the network, below log will be printed and the LED on the board will adjust accordingly.
-```
-I (139842) COLOR_DIMMABLE_LIGHT: ZCL SetAttributeValue message for endpoint(10) cluster(0x0008) server with status(0x00)              
-I (139842) COLOR_DIMMABLE_LIGHT: Set Level: 255
-I (139842) COLOR_DIMMABLE_LIGHT: ZCL SetAttributeValue message for endpoint(10) cluster(0x0006) server with status(0x00)              
-I (139852) COLOR_DIMMABLE_LIGHT: Set On/Off: 1
-I (139952) COLOR_DIMMABLE_LIGHT: ZCL SetAttributeValue message for endpoint(10) cluster(0x0008) server with status(0x00)              
-I (139952) COLOR_DIMMABLE_LIGHT: Set Level: 233
-I (140062) COLOR_DIMMABLE_LIGHT: ZCL SetAttributeValue message for endpoint(10) cluster(0x0008) server with status(0x00)              
-I (140062) COLOR_DIMMABLE_LIGHT: Set Level: 211
-I (140172) COLOR_DIMMABLE_LIGHT: ZCL SetAttributeValue message for endpoint(10) cluster(0x0008) server with status(0x00)              
-I (140172) COLOR_DIMMABLE_LIGHT: Set Level: 189
-I (140282) COLOR_DIMMABLE_LIGHT: ZCL SetAttributeValue message for endpoint(10) cluster(0x0008) server with status(0x00)              
-I (140282) COLOR_DIMMABLE_LIGHT: Set Level: 166
-I (140382) COLOR_DIMMABLE_LIGHT: ZCL SetAttributeValue message for endpoint(10) cluster(0x0008) server with status(0x00)              
-I (140382) COLOR_DIMMABLE_LIGHT: Set Level: 144
-I (140492) COLOR_DIMMABLE_LIGHT: ZCL SetAttributeValue message for endpoint(10) cluster(0x0008) server with status(0x00)              
-I (140492) COLOR_DIMMABLE_LIGHT: Set Level: 122
-I (140602) COLOR_DIMMABLE_LIGHT: ZCL SetAttributeValue message for endpoint(10) cluster(0x0008) server with status(0x00)              
-I (140602) COLOR_DIMMABLE_LIGHT: Set Level: 99
-I (140712) COLOR_DIMMABLE_LIGHT: ZCL SetAttributeValue message for endpoint(10) cluster(0x0008) server with status(0x00)              
-I (140712) COLOR_DIMMABLE_LIGHT: Set Level: 77
-I (140822) COLOR_DIMMABLE_LIGHT: ZCL SetAttributeValue message for endpoint(10) cluster(0x0008) server with status(0x00)              
-I (140822) COLOR_DIMMABLE_LIGHT: Set Level: 55
-I (140932) COLOR_DIMMABLE_LIGHT: ZCL SetAttributeValue message for endpoint(10) cluster(0x0008) server with status(0x00)              
-I (140932) COLOR_DIMMABLE_LIGHT: Set Level: 32
-```
-
-- If the board receives a ZCL `ZCL MoveToColor` ColorControl command from the network, below log will be printed and the LED on the board will adjust accordingly.
-```          
-I (154682) COLOR_DIMMABLE_LIGHT: ZCL SetAttributeValue message for endpoint(10) cluster(0x0300) server with status(0x00)              
-I (154682) COLOR_DIMMABLE_LIGHT: Set Color: 0x0066, 0x0000
-I (154682) COLOR_DIMMABLE_LIGHT: ZCL SetAttributeValue message for endpoint(10) cluster(0x0300) server with status(0x00)              
-I (154692) COLOR_DIMMABLE_LIGHT: Set Color: 0x0066, 0x0066
-I (154792) COLOR_DIMMABLE_LIGHT: ZCL SetAttributeValue message for endpoint(10) cluster(0x0300) server with status(0x00)              
-I (154792) COLOR_DIMMABLE_LIGHT: Set Color: 0x00cc, 0x0066
-I (154792) COLOR_DIMMABLE_LIGHT: ZCL SetAttributeValue message for endpoint(10) cluster(0x0300) server with status(0x00)              
-I (154802) COLOR_DIMMABLE_LIGHT: Set Color: 0x00cc, 0x00cc
-I (154902) COLOR_DIMMABLE_LIGHT: ZCL SetAttributeValue message for endpoint(10) cluster(0x0300) server with status(0x00)              
-I (154902) COLOR_DIMMABLE_LIGHT: Set Color: 0x0133, 0x00cc
-I (154902) COLOR_DIMMABLE_LIGHT: ZCL SetAttributeValue message for endpoint(10) cluster(0x0300) server with status(0x00)              
-I (154912) COLOR_DIMMABLE_LIGHT: Set Color: 0x0133, 0x0133
-I (155012) COLOR_DIMMABLE_LIGHT: ZCL SetAttributeValue message for endpoint(10) cluster(0x0300) server with status(0x00)              
-I (155012) COLOR_DIMMABLE_LIGHT: Set Color: 0x0199, 0x0133
-I (155012) COLOR_DIMMABLE_LIGHT: ZCL SetAttributeValue message for endpoint(10) cluster(0x0300) server with status(0x00)              
-I (155022) COLOR_DIMMABLE_LIGHT: Set Color: 0x0199, 0x0199
-I (155122) COLOR_DIMMABLE_LIGHT: ZCL SetAttributeValue message for endpoint(10) cluster(0x0300) server with status(0x00)              
-I (155122) COLOR_DIMMABLE_LIGHT: Set Color: 0x0200, 0x0199
-I (155122) COLOR_DIMMABLE_LIGHT: ZCL SetAttributeValue message for endpoint(10) cluster(0x0300) server with status(0x00)              
-I (155132) COLOR_DIMMABLE_LIGHT: Set Color: 0x0200, 0x0200
-I (155232) COLOR_DIMMABLE_LIGHT: ZCL SetAttributeValue message for endpoint(10) cluster(0x0300) server with status(0x00)              
-I (155232) COLOR_DIMMABLE_LIGHT: Set Color: 0x0266, 0x0200
-I (155232) COLOR_DIMMABLE_LIGHT: ZCL SetAttributeValue message for endpoint(10) cluster(0x0300) server with status(0x00)              
-I (155242) COLOR_DIMMABLE_LIGHT: Set Color: 0x0266, 0x0266
-I (155342) COLOR_DIMMABLE_LIGHT: ZCL SetAttributeValue message for endpoint(10) cluster(0x0300) server with status(0x00)              
-I (155342) COLOR_DIMMABLE_LIGHT: Set Color: 0x02cc, 0x0266
-I (155342) COLOR_DIMMABLE_LIGHT: ZCL SetAttributeValue message for endpoint(10) cluster(0x0300) server with status(0x00)              
-I (155352) COLOR_DIMMABLE_LIGHT: Set Color: 0x02cc, 0x02cc
-I (155452) COLOR_DIMMABLE_LIGHT: ZCL SetAttributeValue message for endpoint(10) cluster(0x0300) server with status(0x00)              
-I (155452) COLOR_DIMMABLE_LIGHT: Set Color: 0x0333, 0x02cc
-I (155452) COLOR_DIMMABLE_LIGHT: ZCL SetAttributeValue message for endpoint(10) cluster(0x0300) server with status(0x00)              
-I (155462) COLOR_DIMMABLE_LIGHT: Set Color: 0x0333, 0x0333
-I (155562) COLOR_DIMMABLE_LIGHT: ZCL SetAttributeValue message for endpoint(10) cluster(0x0300) server with status(0x00)              
-I (155562) COLOR_DIMMABLE_LIGHT: Set Color: 0x0399, 0x0333
-I (155562) COLOR_DIMMABLE_LIGHT: ZCL SetAttributeValue message for endpoint(10) cluster(0x0300) server with status(0x00)              
-I (155572) COLOR_DIMMABLE_LIGHT: Set Color: 0x0399, 0x0399
-I (155672) COLOR_DIMMABLE_LIGHT: ZCL SetAttributeValue message for endpoint(10) cluster(0x0300) server with status(0x00)              
-I (155672) COLOR_DIMMABLE_LIGHT: Set Color: 0x0400, 0x0399
-I (155672) COLOR_DIMMABLE_LIGHT: ZCL SetAttributeValue message for endpoint(10) cluster(0x0300) server with status(0x00)              
-I (155682) COLOR_DIMMABLE_LIGHT: Set Color: 0x0400, 0x0400
-```
-
-## Troubleshooting
-
-For any technical queries, please open an [issue](https://github.com/espressif/esp-zigbee-sdk/issues) on GitHub. We will get back to you soon.
+Contributing
+- Suggest fixes or file issues in this repository. If you change GPIO mapping or
+  state semantics, update tests to reflect the new behaviour.

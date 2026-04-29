@@ -377,12 +377,3 @@ esp_err_t valve_driver_set_power(uint8_t valve_index, bool on)
     xSemaphoreGive(s_lock);
     return ESP_OK;
 }
-
-bool valve_driver_get_physical_state(uint8_t valve_index)
-{
-    if (valve_index >= VALVE_COUNT) return false;
-    int gpio = s_valve_gpios[valve_index];
-    if (gpio < 0) return false;
-    int level = gpio_get_level(gpio);
-    return level != 0;
-}

@@ -48,11 +48,6 @@ esp_err_t valve_driver_init(bool default_open);
  */
 esp_err_t valve_driver_set_power(uint8_t valve_index, bool on);
 
-/* For testing/inspection: get current physical state
- * returns true if physically open (GPIO=1), false otherwise
- */
-bool valve_driver_get_physical_state(uint8_t valve_index);
-
 #ifdef CONFIG_UNITY
 /* Test helpers exposed only for unit tests */
 typedef enum { VALVE_DRV_STATE_CLOSED = 0, VALVE_DRV_STATE_OPENING, VALVE_DRV_STATE_OPEN, VALVE_DRV_STATE_PENDING } valve_drv_state_t;
