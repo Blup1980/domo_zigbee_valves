@@ -80,6 +80,9 @@ esp_err_t valve_driver_test_finish_open(uint8_t valve_index)
     if (valve_index >= VALVE_COUNT) return ESP_ERR_INVALID_ARG;
     /* call the finish_opening logic directly to simulate timer expiry */
     if (s_valve_timer[valve_index] != NULL) {
+        /* For unit tests, the test code may maintain its own timer objects. If so, we can
+         * call finish_opening with the stored timer handle. Otherwise, try to call
+         * finish_opening directly which uses pvTimerGetTimerID to extract index. */
         finish_opening(s_valve_timer[valve_index]);
         return ESP_OK;
     }
