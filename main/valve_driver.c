@@ -25,7 +25,7 @@ static const char *TAG = "valve_driver";
 
 static int s_valve_gpios[VALVE_COUNT];
 
-typedef enum { VALVE_STATE_CLOSED = 0, VALVE_STATE_OPENING, VALVE_STATE_OPEN } valve_state_t;
+typedef enum { VALVE_STATE_CLOSED = 0, VALVE_STATE_OPENING, VALVE_STATE_OPEN, VALVE_STATE_PENDING } valve_state_t;
 
 /* runtime state */
 static valve_state_t s_valve_state[VALVE_COUNT];
@@ -42,10 +42,21 @@ static int count_opening(void)
     return c;
 }
 
-/* queue of pending valve indices that want to open when slot is available */
-static uint8_t s_pending_queue[VALVE_COUNT];
-static int s_pending_head = 0;
-static int s_pending_tail = 0;
+/* Per-valve pending state: a valve can be VALVE_STATE_PENDING when an open
+ * request arrived but capacity was full. When a slot is available the driver
+ * will select the lowest-index valve with VALVE_STATE_PENDING and start it.
+ */
+
+static bool find_lowest_pending(uint8_t *out_idx)
+{
+    for (uint8_t i = 0; i < VALVE_COUNT; ++i) {
+        if (s_valve_state[i] == VALVE_STATE_PENDING) {
+            *out_idx = i;
+            return true;
+        }
+    }
+    return false;
+}
 
 /* constants */
 #define VALVE_OPENING_MS (3 * 60 * 1000) /* 3 minutes */
@@ -53,17 +64,11 @@ static int s_pending_tail = 0;
 
 static void pending_enqueue(uint8_t idx)
 {
-    /* avoid duplicate entries */
-    for (int i = s_pending_head; i != s_pending_tail; i = (i + 1) % VALVE_COUNT) {
-        if (s_pending_queue[i] == idx) return;
+    /* mark valve as pending if it's currently closed (avoid duplicates) */
+    if (idx >= VALVE_COUNT) return;
+    if (s_valve_state[idx] == VALVE_STATE_CLOSED) {
+        s_valve_state[idx] = VALVE_STATE_PENDING;
     }
-    int next = (s_pending_tail + 1) % VALVE_COUNT;
-    if (next == s_pending_head) {
-        ESP_LOGW(TAG, "Pending queue full, dropping request for valve %d", idx + 1);
-        return;
-    }
-    s_pending_queue[s_pending_tail] = idx;
-    s_pending_tail = next;
 }
 
 #ifdef CONFIG_UNITY
@@ -80,8 +85,9 @@ int valve_driver_test_get_opening_count(void)
 
 int valve_driver_test_get_pending_length(void)
 {
-    if (s_pending_tail >= s_pending_head) return s_pending_tail - s_pending_head;
-    return VALVE_COUNT - (s_pending_head - s_pending_tail);
+    int c = 0;
+    for (int i = 0; i < VALVE_COUNT; ++i) if (s_valve_state[i] == VALVE_STATE_PENDING) ++c;
+    return c;
 }
 
 esp_err_t valve_driver_test_finish_open(uint8_t valve_index)
@@ -98,9 +104,9 @@ esp_err_t valve_driver_test_finish_open(uint8_t valve_index)
     /* if no timer, still set state to open and report */
     xSemaphoreTake(s_lock, portMAX_DELAY);
     s_valve_state[valve_index] = VALVE_STATE_OPEN;
-    /* start next pending if any */
+    /* start next pending if any (lowest index) */
     uint8_t next_idx;
-    if (count_opening() < VALVE_MAX_CONCURRENT_OPENING && pending_dequeue(&next_idx)) {
+    if (count_opening() < VALVE_MAX_CONCURRENT_OPENING && find_lowest_pending(&next_idx)) {
         int next_gpio = s_valve_gpios[next_idx];
         if (next_gpio >= 0) gpio_set_level(next_gpio, 1);
         s_valve_state[next_idx] = VALVE_STATE_OPENING;
@@ -121,8 +127,14 @@ int valve_driver_test_get_pending_at(int pos)
 {
     int len = valve_driver_test_get_pending_length();
     if (pos < 0 || pos >= len) return -1;
-    int idx = (s_pending_head + pos) % VALVE_COUNT;
-    return s_pending_queue[idx];
+    int seen = 0;
+    for (int i = 0; i < VALVE_COUNT; ++i) {
+        if (s_valve_state[i] == VALVE_STATE_PENDING) {
+            if (seen == pos) return i;
+            ++seen;
+        }
+    }
+    return -1;
 }
 
 int valve_driver_test_get_max_concurrent_opening(void)
@@ -130,29 +142,6 @@ int valve_driver_test_get_max_concurrent_opening(void)
     return VALVE_MAX_CONCURRENT_OPENING;
 }
 #endif
-
-static bool pending_dequeue(uint8_t *out_idx)
-{
-    if (s_pending_head == s_pending_tail) return false;
-    *out_idx = s_pending_queue[s_pending_head];
-    s_pending_head = (s_pending_head + 1) % VALVE_COUNT;
-    return true;
-}
-
-static void pending_remove(uint8_t idx)
-{
-    int read = s_pending_head;
-    int write = s_pending_head;
-    while (read != s_pending_tail) {
-        uint8_t v = s_pending_queue[read];
-        if (v != idx) {
-            s_pending_queue[write] = v;
-            write = (write + 1) % VALVE_COUNT;
-        }
-        read = (read + 1) % VALVE_COUNT;
-    }
-    s_pending_tail = write;
-}
 
 /* Helper: send a ZCL report for Multistate Input PresentValue for an endpoint.
  * Mapping: valve_index 0 -> endpoint 11, etc.
@@ -208,10 +197,9 @@ static void finish_opening(TimerHandle_t timer)
     s_valve_state[idx] = VALVE_STATE_OPEN;
     ESP_LOGI(TAG, "Valve %d finished opening (now OPEN). Opening count=%d", idx + 1, count_opening());
 
-    /* start next pending if any */
+    /* start next pending if any (choose lowest index) */
     uint8_t next_idx;
-    if (count_opening() < VALVE_MAX_CONCURRENT_OPENING && pending_dequeue(&next_idx)) {
-        /* begin opening next */
+    if (count_opening() < VALVE_MAX_CONCURRENT_OPENING && find_lowest_pending(&next_idx)) {
         int next_gpio = s_valve_gpios[next_idx];
         if (next_gpio >= 0) gpio_set_level(next_gpio, 1); /* start power-hungry transition */
         s_valve_state[next_idx] = VALVE_STATE_OPENING;
@@ -220,7 +208,7 @@ static void finish_opening(TimerHandle_t timer)
             s_valve_timer[next_idx] = xTimerCreate("valve_timer", pdMS_TO_TICKS(VALVE_OPENING_MS), pdFALSE, (void *)((uintptr_t)next_idx), finish_opening);
         }
         xTimerStart(s_valve_timer[next_idx], 0);
-        ESP_LOGI(TAG, "Dequeued and started opening valve %d. Opening count=%d", next_idx + 1, count_opening());
+        ESP_LOGI(TAG, "Started opening pending valve %d. Opening count=%d", next_idx + 1, count_opening());
         /* report opening state for the started valve */
         report_multistate_present_value(next_idx, 2);
     }
@@ -286,7 +274,6 @@ esp_err_t valve_driver_init(bool default_open)
 
     /* initialize sequencing primitives */
     s_lock = xSemaphoreCreateMutex();
-    s_pending_head = s_pending_tail = 0;
 
     return ESP_OK;
 }
@@ -304,20 +291,21 @@ esp_err_t valve_driver_set_power(uint8_t valve_index, bool on)
     xSemaphoreTake(s_lock, portMAX_DELAY);
     if (!on) {
         /* Close immediately (instantaneous) and cancel any opening */
-        /* remove from pending queue if queued */
-        pending_remove(valve_index);
+        /* remove pending state if set */
+        if (s_valve_state[valve_index] == VALVE_STATE_PENDING) s_valve_state[valve_index] = VALVE_STATE_CLOSED;
         if (s_valve_timer[valve_index] != NULL) {
             xTimerStop(s_valve_timer[valve_index], 0);
             xTimerDelete(s_valve_timer[valve_index], 0);
             s_valve_timer[valve_index] = NULL;
         }
-        /* if it was opening, decrement count and start next pending if any
-         * Guard decrement to avoid negative counts. If the valve was opening
+        /* If the valve was opening
          * then we should attempt to start a queued valve to fill the freed slot.
          */
         if (s_valve_state[valve_index] == VALVE_STATE_OPENING) {
+            /* set it to closed so we don't count it as in opening state anymore for the total count */
+            s_valve_state[valve_index] = VALVE_STATE_CLOSED;
             uint8_t next_idx;
-            if (count_opening() < VALVE_MAX_CONCURRENT_OPENING && pending_dequeue(&next_idx)) {
+            if (count_opening() < VALVE_MAX_CONCURRENT_OPENING && find_lowest_pending(&next_idx)) {
                 int next_gpio = s_valve_gpios[next_idx];
                 if (next_gpio >= 0) gpio_set_level(next_gpio, 1);
                 s_valve_state[next_idx] = VALVE_STATE_OPENING;
@@ -325,7 +313,7 @@ esp_err_t valve_driver_set_power(uint8_t valve_index, bool on)
                     s_valve_timer[next_idx] = xTimerCreate("valve_timer", pdMS_TO_TICKS(VALVE_OPENING_MS), pdFALSE, (void *)((uintptr_t)next_idx), finish_opening);
                 }
                 xTimerStart(s_valve_timer[next_idx], 0);
-                ESP_LOGI(TAG, "Dequeued and started opening valve %d (from close). Opening count=%d", next_idx + 1, count_opening());
+                ESP_LOGI(TAG, "Started opening pending valve %d (from close). Opening count=%d", next_idx + 1, count_opening());
                 report_multistate_present_value(next_idx, 2);
             }
         }
