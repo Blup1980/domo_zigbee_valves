@@ -11,6 +11,7 @@
 
 #include "light_driver.h"
 #include "alarm_timer.h"
+#include "valve_driver.h"
 
 #include "esp_zigbee.h"
 #include "ezbee/zha.h"
@@ -25,7 +26,13 @@ esp_err_t deferred_driver_init(void)
 
     ESP_RETURN_ON_FALSE(!is_inited, ESP_OK, TAG, "Deferred driver already initialized");
 
+    /* Initialize light driver (left in place) and valve driver */
     light_driver_init(false);
+    esp_err_t err = valve_driver_init(false); /* default closed */
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "valve_driver_init returned %d", err);
+    }
+
     is_inited = true;
 
     return ESP_OK;
@@ -169,10 +176,29 @@ static void zcl_core_set_attr_value_handler(ezb_zcl_set_attr_value_message_t *me
     ESP_LOGI(TAG, "ZCL SetAttributeValue message for endpoint(%d) cluster(0x%04x) %s with status(0x%02x)", message->info.dst_ep,
              message->info.cluster_id, message->info.cluster_role == EZB_ZCL_CLUSTER_SERVER ? "server" : "client",
              message->info.status);
+
+    /* If this is an On/Off cluster targeted at our valve endpoints (11..21) route to valve driver */
+    if (message->info.cluster_id == EZB_ZCL_CLUSTER_ID_ON_OFF) {
+        uint8_t ep = message->info.dst_ep;
+        if (ep >= 11 && ep <= 21) {
+            if (message->in.attribute.id == EZB_ZCL_ATTR_ON_OFF_ON_OFF_ID) {
+                uint8_t on = *(uint8_t *)message->in.attribute.data.value;
+                uint8_t valve_index = ep - 11; /* Valve 1 -> index 0 */
+                esp_err_t err = valve_driver_set_power(valve_index, on != 0);
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG, "Failed to set valve %d state: %d", valve_index + 1, err);
+                }
+                ESP_LOGI(TAG, "Set Valve %d On/Off: %d", valve_index + 1, on);
+                return;
+            }
+        } else {
+            /* non-valve endpoints use existing light handler */
+            light_driver_set_on_off_attribute(&message->in.attribute);
+            return;
+        }
+    }
+
     switch (message->info.cluster_id) {
-    case EZB_ZCL_CLUSTER_ID_ON_OFF:
-        light_driver_set_on_off_attribute(&message->in.attribute);
-        break;
     case EZB_ZCL_CLUSTER_ID_LEVEL:
         light_driver_set_level_attribute(&message->in.attribute);
         break;
@@ -200,19 +226,53 @@ static void esp_zigbee_zcl_core_action_handler(ezb_zcl_core_action_callback_id_t
     }
 }
 
-esp_err_t esp_zigbee_create_zha_color_dimmable_light_device(void)
+esp_err_t esp_zigbee_create_valve_devices(void)
 {
-    ezb_af_device_desc_t                  dev_desc  = ezb_af_create_device_desc();
-    ezb_zha_color_dimmable_light_config_t light_cfg = EZB_ZHA_COLOR_DIMMABLE_LIGHT_CONFIG();
-    ezb_af_ep_desc_t       ep_desc = ezb_zha_create_color_dimmable_light(ESP_ZIGBEE_HA_COLOR_DIMMABLE_LIGHT_EP_ID, &light_cfg);
-    ezb_zcl_cluster_desc_t basic_desc = {0};
+    ezb_af_device_desc_t dev_desc = ezb_af_create_device_desc();
+    ezb_zha_on_off_switch_config_t sw_cfg = EZB_ZHA_ON_OFF_SWITCH_CONFIG();
 
-    basic_desc = ezb_af_endpoint_get_cluster_desc(ep_desc, EZB_ZCL_CLUSTER_ID_BASIC, EZB_ZCL_CLUSTER_SERVER);
-    ezb_zcl_basic_cluster_desc_add_attr(basic_desc, EZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, (void *)ESP_MANUFACTURER_NAME);
-    ezb_zcl_basic_cluster_desc_add_attr(basic_desc, EZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, (void *)ESP_MODEL_IDENTIFIER);
-    ESP_ERROR_CHECK(ezb_af_device_add_endpoint_desc(dev_desc, ep_desc));
+    static char s_model_id[11][16];
+
+    for (uint8_t ep = 11; ep <= 21; ++ep) {
+        ezb_af_ep_desc_t ep_desc = ezb_zha_create_on_off_switch(ep, &sw_cfg);
+        if (ep_desc == NULL) {
+            ESP_LOGE(TAG, "Failed to create endpoint %d", ep);
+            return ESP_FAIL;
+        }
+
+        ezb_zcl_cluster_desc_t basic_desc = ezb_af_endpoint_get_cluster_desc(ep_desc, EZB_ZCL_CLUSTER_ID_BASIC, EZB_ZCL_CLUSTER_SERVER);
+        ezb_zcl_basic_cluster_desc_add_attr(basic_desc, EZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, (void *)ESP_MANUFACTURER_NAME);
+        /* Set model identifier to "Valve X" for clarity in Home Assistant */
+        snprintf(s_model_id[ep - 11], sizeof(s_model_id[0]), "Valve %d", ep - 10);
+        ezb_zcl_basic_cluster_desc_add_attr(basic_desc, EZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, (void *)s_model_id[ep - 11]);
+        /* Add a Multistate Input server cluster to report physical valve state as a 3-state value:
+         *  1 = Closed
+         *  2 = Opening
+         *  3 = Open
+         * This is exposed in a separate cluster so Home Assistant can observe physical state changes
+         * without changing the logical On/Off attribute behavior. */
+        ezb_zcl_multistate_input_cluster_server_config_t ms_cfg = {
+            .number_of_states = 3,
+            .out_of_service = false,
+            .present_value = 1, /* initial: Closed */
+            .status_flags = 0,
+        };
+        ezb_zcl_cluster_desc_t ms_desc = ezb_zcl_multistate_input_create_cluster_desc(&ms_cfg, EZB_ZCL_CLUSTER_SERVER);
+        if (ms_desc != NULL) {
+            ezb_err_t rc = ezb_af_endpoint_add_cluster_desc(ep_desc, ms_desc);
+            if (rc != EZB_ERR_NONE) {
+                ESP_LOGW(TAG, "Failed to attach MultistateInput cluster to endpoint %d: %d", ep, rc);
+            }
+        } else {
+            ESP_LOGW(TAG, "Failed to create MultistateInput cluster descriptor for endpoint %d", ep);
+        }
+
+        ESP_ERROR_CHECK(ezb_af_device_add_endpoint_desc(dev_desc, ep_desc));
+    }
+
     ESP_ERROR_CHECK(ezb_af_device_desc_register(dev_desc));
 
+    /* Register ZCL core action handler for attribute sets */
     ezb_zcl_core_action_handler_register(esp_zigbee_zcl_core_action_handler);
 
     return ESP_OK;
@@ -236,7 +296,7 @@ static void esp_zigbee_stack_main_task(void *pvParameters)
 
     ESP_ERROR_CHECK(esp_zigbee_setup_commissioning());
 
-    ESP_ERROR_CHECK(esp_zigbee_create_zha_color_dimmable_light_device());
+    ESP_ERROR_CHECK(esp_zigbee_create_valve_devices());
 
     ESP_ERROR_CHECK(esp_zigbee_start(false));
 
