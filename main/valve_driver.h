@@ -68,6 +68,12 @@ int valve_driver_test_get_pending_length(void);
 
 /** Simulate timer expiry: finish opening for valve_index. */
 esp_err_t valve_driver_test_finish_open(uint8_t valve_index);
+#
+/** Get the queued pending valve index at position pos (0..pending_length-1). Returns -1 if out of range. */
+int valve_driver_test_get_pending_at(int pos);
+
+/** Get configured maximum concurrent openings. */
+int valve_driver_test_get_max_concurrent_opening(void);
 #endif
 
 #ifdef __cplusplus

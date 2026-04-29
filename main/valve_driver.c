@@ -93,6 +93,22 @@ esp_err_t valve_driver_test_finish_open(uint8_t valve_index)
 }
 #endif
 
+#ifdef CONFIG_UNITY
+int valve_driver_test_get_pending_at(int pos)
+{
+    int len = valve_driver_test_get_pending_length();
+    if (pos < 0 || pos >= len) return -1;
+    int idx = (s_pending_head + pos) % VALVE_COUNT;
+    return s_pending_queue[idx];
+}
+
+int valve_driver_test_get_max_concurrent_opening(void)
+{
+    return VALVE_MAX_CONCURRENT_OPENING;
+}
+#endif
+#endif
+
 static bool pending_dequeue(uint8_t *out_idx)
 {
     if (s_pending_head == s_pending_tail) return false;

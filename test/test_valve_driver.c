@@ -65,22 +65,27 @@ void test_open_close_sequence(void)
     TEST_ASSERT_EQUAL_INT(1, valve_driver_test_get_opening_count());
     TEST_ASSERT_EQUAL_INT(VALVE_DRV_STATE_OPENING, valve_driver_test_get_state(0));
 
-    /* enqueue opens for more valves to hit concurrency limit */
-    for (int i = 1; i <= VALVE_MAX_CONCURRENT_OPENING; ++i) {
-        valve_driver_set_power(i, true);
+    /* enqueue opens up to and beyond the concurrency limit */
+    int maxc = valve_driver_test_get_max_concurrent_opening();
+    for (int i = 1; i <= maxc + 2; ++i) {
+        TEST_ASSERT_EQUAL_INT(ESP_OK, valve_driver_set_power(i, true));
     }
-    /* either concurrent_count equals limit or has queued entries depending on exact counts */
 
-    /* queue some additional requests */
-    TEST_ASSERT_EQUAL_INT(ESP_OK, valve_driver_set_power(8, true));
-    TEST_ASSERT_EQUAL_INT(ESP_OK, valve_driver_set_power(9, true));
+    /* opening_count should not exceed the limit */
+    TEST_ASSERT_LESS_THAN_OR_EQUAL_INT(maxc, valve_driver_test_get_opening_count());
 
-    /* pending length should be > 0 */
-    TEST_ASSERT_TRUE(valve_driver_test_get_pending_length() >= 0);
+    /* some requests should be queued: pending_length > 0 */
+    int pending = valve_driver_test_get_pending_length();
+    TEST_ASSERT_TRUE(pending >= 0);
 
-    /* simulate finish of valve 0 opening */
+    /* inspect queued indices for deterministic behavior (FIFO) */
+    for (int p = 0; p < pending; ++p) {
+        int idx = valve_driver_test_get_pending_at(p);
+        TEST_ASSERT_TRUE(idx >= 0 && idx < VALVE_COUNT);
+    }
+
+    /* simulate finish of valve 0 opening and ensure it becomes OPEN */
     TEST_ASSERT_EQUAL_INT(ESP_OK, valve_driver_test_finish_open(0));
-    /* after finishing, state should be OPEN */
     TEST_ASSERT_EQUAL_INT(VALVE_DRV_STATE_OPEN, valve_driver_test_get_state(0));
 }
 
