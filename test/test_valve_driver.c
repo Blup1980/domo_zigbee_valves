@@ -89,6 +89,9 @@ int test_trigger_timer_for_index(int valve_index)
     return 1;
 }
 
+/* expose invariant_check from driver for tests */
+extern void invariant_check(void);
+
 /* Tests */
 void test_init_defaults(void)
 {

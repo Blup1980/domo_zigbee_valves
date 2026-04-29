@@ -68,6 +68,8 @@ static void pending_enqueue(uint8_t idx)
     if (idx >= VALVE_COUNT) return;
     if (s_valve_state[idx] == VALVE_STATE_CLOSED) {
         s_valve_state[idx] = VALVE_STATE_PENDING;
+        /* report pending as 'Opening' in Multistate Input so HA sees activity */
+        report_multistate_present_value(idx, 2);
     }
 }
 
@@ -177,6 +179,23 @@ static void report_multistate_present_value(uint8_t valve_index, uint16_t presen
 
     esp_zigbee_lock_release();
 }
+
+/* In tests we may want to assert certain invariants; provide a debug-only invariant
+ * check to help catch logic errors during development. This is a noop in production.
+ */
+#ifdef CONFIG_UNITY
+static void invariant_check(void)
+{
+    int opening = 0;
+    for (int i = 0; i < VALVE_COUNT; ++i) {
+        if (s_valve_state[i] == VALVE_STATE_OPENING) ++opening;
+    }
+    /* opening must not exceed allowed maximum */
+    TEST_ASSERT_LESS_OR_EQUAL_INT(VALVE_MAX_CONCURRENT_OPENING, opening);
+}
+#else
+static void invariant_check(void) {}
+#endif
 
 static void finish_opening(TimerHandle_t timer)
 {
