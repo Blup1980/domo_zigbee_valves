@@ -42,6 +42,9 @@ static int count_opening(void)
     return c;
 }
 
+/* forward declaration so helper functions can call it before its definition */
+static void report_multistate_present_value(uint8_t valve_index, uint16_t present_value);
+
 /* Per-valve pending state: a valve can be VALVE_STATE_PENDING when an open
  * request arrived but capacity was full. When a slot is available the driver
  * will select the lowest-index valve with VALVE_STATE_PENDING and start it.
