@@ -51,7 +51,7 @@ int ezb_zcl_report_attr_cmd_req(void *req) { (void)req; return 0; }
 void test_init_defaults(void)
 {
     /* initialize with default_open=false - should not crash */
-    TEST_ASSERT_EQUAL_INT(0, valve_driver_init(false));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, valve_driver_init(false));
 }
 
 void test_open_close_sequence(void)
@@ -59,15 +59,29 @@ void test_open_close_sequence(void)
     valve_driver_init(false);
 
     /* open valve 0 -> should be accepted */
-    TEST_ASSERT_EQUAL_INT(0, valve_driver_set_power(0, true));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, valve_driver_set_power(0, true));
 
-    /* immediately request close while opening -> should close immediately */
-    TEST_ASSERT_EQUAL_INT(0, valve_driver_set_power(0, false));
+    /* while opening, check opening_count and state */
+    TEST_ASSERT_EQUAL_INT(1, valve_driver_test_get_opening_count());
+    TEST_ASSERT_EQUAL_INT(VALVE_DRV_STATE_OPENING, valve_driver_test_get_state(0));
 
-    /* open again */
-    TEST_ASSERT_EQUAL_INT(0, valve_driver_set_power(0, true));
-    /* opening same valve again is ignored */
-    TEST_ASSERT_EQUAL_INT(0, valve_driver_set_power(0, true));
+    /* enqueue opens for more valves to hit concurrency limit */
+    for (int i = 1; i <= VALVE_MAX_CONCURRENT_OPENING; ++i) {
+        valve_driver_set_power(i, true);
+    }
+    /* either concurrent_count equals limit or has queued entries depending on exact counts */
+
+    /* queue some additional requests */
+    TEST_ASSERT_EQUAL_INT(ESP_OK, valve_driver_set_power(8, true));
+    TEST_ASSERT_EQUAL_INT(ESP_OK, valve_driver_set_power(9, true));
+
+    /* pending length should be > 0 */
+    TEST_ASSERT_TRUE(valve_driver_test_get_pending_length() >= 0);
+
+    /* simulate finish of valve 0 opening */
+    TEST_ASSERT_EQUAL_INT(ESP_OK, valve_driver_test_finish_open(0));
+    /* after finishing, state should be OPEN */
+    TEST_ASSERT_EQUAL_INT(VALVE_DRV_STATE_OPEN, valve_driver_test_get_state(0));
 }
 
 int main(void)

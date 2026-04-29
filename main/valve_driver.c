@@ -57,6 +57,42 @@ static void pending_enqueue(uint8_t idx)
     s_pending_tail = next;
 }
 
+#ifdef CONFIG_UNITY
+valve_drv_state_t valve_driver_test_get_state(uint8_t valve_index)
+{
+    if (valve_index >= VALVE_COUNT) return VALVE_DRV_STATE_CLOSED;
+    return (valve_drv_state_t)s_valve_state[valve_index];
+}
+
+int valve_driver_test_get_opening_count(void)
+{
+    return s_opening_count;
+}
+
+int valve_driver_test_get_pending_length(void)
+{
+    if (s_pending_tail >= s_pending_head) return s_pending_tail - s_pending_head;
+    return VALVE_COUNT - (s_pending_head - s_pending_tail);
+}
+
+esp_err_t valve_driver_test_finish_open(uint8_t valve_index)
+{
+    if (valve_index >= VALVE_COUNT) return ESP_ERR_INVALID_ARG;
+    /* call the finish_opening logic directly to simulate timer expiry */
+    if (s_valve_timer[valve_index] != NULL) {
+        finish_opening(s_valve_timer[valve_index]);
+        return ESP_OK;
+    }
+    /* if no timer, still set state to open and report */
+    xSemaphoreTake(s_lock, portMAX_DELAY);
+    s_valve_state[valve_index] = VALVE_STATE_OPEN;
+    if (s_opening_count > 0) s_opening_count--;
+    xSemaphoreGive(s_lock);
+    report_multistate_present_value(valve_index, 3);
+    return ESP_OK;
+}
+#endif
+
 static bool pending_dequeue(uint8_t *out_idx)
 {
     if (s_pending_head == s_pending_tail) return false;
