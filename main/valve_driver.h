@@ -19,17 +19,24 @@ extern "C" {
 /* Placeholder GPIO mapping for valves 0..10 (Valve 1..11).
  * Replace -1 with actual GPIO numbers. Negative values mean "not configured".
  */
-#define VALVE_GPIO_0  -1
-#define VALVE_GPIO_1  -1
-#define VALVE_GPIO_2  -1
-#define VALVE_GPIO_3  -1
-#define VALVE_GPIO_4  -1
-#define VALVE_GPIO_5  -1
-#define VALVE_GPIO_6  -1
-#define VALVE_GPIO_7  -1
-#define VALVE_GPIO_8  -1
-#define VALVE_GPIO_9  -1
-#define VALVE_GPIO_10 -1
+#define VALVE_GPIO_0  10
+#define VALVE_GPIO_1  11
+#define VALVE_GPIO_2  25
+#define VALVE_GPIO_3  12
+#define VALVE_GPIO_4  22
+#define VALVE_GPIO_5  0
+#define VALVE_GPIO_6  1
+#define VALVE_GPIO_7  2
+#define VALVE_GPIO_8  3
+#define VALVE_GPIO_9  4
+#define VALVE_GPIO_10 5
+
+typedef enum {
+    VALVE_STATE_CLOSED = 0,
+    VALVE_STATE_OPENING,
+    VALVE_STATE_OPEN,
+    VALVE_STATE_PENDING
+} valve_state_t;
 
 /**
  * @brief Initialize valve driver and configure GPIOs.
@@ -48,22 +55,7 @@ esp_err_t valve_driver_init(bool default_open);
  */
 esp_err_t valve_driver_set_power(uint8_t valve_index, bool on);
 
-#ifdef CONFIG_UNITY
-/* Test helpers exposed only for unit tests */
-typedef enum { VALVE_DRV_STATE_CLOSED = 0, VALVE_DRV_STATE_OPENING, VALVE_DRV_STATE_OPEN, VALVE_DRV_STATE_PENDING } valve_drv_state_t;
-
-/** Return internal state for tests. */
-valve_drv_state_t valve_driver_test_get_state(uint8_t valve_index);
-
-/** Return current number of valves in OPENING state. */
-int valve_driver_test_get_opening_count(void);
-
-/** Simulate timer expiry: finish opening for valve_index. */
-esp_err_t valve_driver_test_finish_open(uint8_t valve_index);
-
-/** Get configured maximum concurrent openings. */
-int valve_driver_test_get_max_concurrent_opening(void);
-#endif
+void valve_changed_callback(uint8_t valve_index, valve_state_t new_state);
 
 #ifdef __cplusplus
 }

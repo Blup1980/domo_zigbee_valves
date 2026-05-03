@@ -16,9 +16,9 @@
 #include "esp_zigbee.h"
 #include "ezbee/zha.h"
 
-#include "coordinator_valves.h"
+#include "router_valves.h"
 
-static const char *TAG = "COORDINATOR_VALVES";
+static const char *TAG = "ROUTER_VALVES";
 
 esp_err_t deferred_driver_init(void)
 {
@@ -27,7 +27,7 @@ esp_err_t deferred_driver_init(void)
     ESP_RETURN_ON_FALSE(!is_inited, ESP_OK, TAG, "Deferred driver already initialized");
 
     /* Initialize light driver (left in place) and valve driver */
-    light_driver_init(false);
+    light_driver_init(ESP_ZIGBEE_HA_NB_EP);
     esp_err_t err = valve_driver_init(false); /* default closed */
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "valve_driver_init returned %d", err);
@@ -61,7 +61,7 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
             ESP_LOGI(TAG, "Deferred driver initialization %s", deferred_driver_init() ? "failed" : "successful");
             ESP_LOGI(TAG, "Device started up in%s factory-reset mode", ezb_bdb_is_factory_new() ? "" : " non");
             if (ezb_bdb_is_factory_new()) {
-                ezb_bdb_start_top_level_commissioning(EZB_BDB_MODE_NETWORK_FORMATION);
+                ezb_bdb_start_top_level_commissioning(EZB_BDB_MODE_NETWORK_STEERING);
             } else {
                 ESP_LOGI(TAG, "Device reboot");
             }
@@ -70,31 +70,22 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
             alarm_timer_schedule(esp_zigbee_alarm_bdb_commissioning, EZB_BDB_MODE_INITIALIZATION, 1000);
         }
     } break;
-    case EZB_BDB_SIGNAL_FORMATION: {
+    case EZB_BDB_SIGNAL_STEERING: {
         ezb_bdb_comm_status_t status = *((ezb_bdb_comm_status_t *)ezb_app_signal_get_params(app_signal));
         if (status == EZB_BDB_STATUS_SUCCESS) {
             ezb_extpanid_t extended_pan_id;
             ezb_nwk_get_extended_panid(&extended_pan_id);
-            ESP_LOGI(TAG, "Formed network successfully: PAN ID(0x%04hx, EXT: 0x%llx), Channel(%d), Short Address(0x%04hx)",
+            ESP_LOGI(TAG, "Joined network successfully: PAN ID(0x%04hx, EXT: 0x%llx), Channel(%d), Short Address(0x%04hx)",
                      ezb_nwk_get_panid(), extended_pan_id.u64, ezb_nwk_get_current_channel(), ezb_nwk_get_short_address());
-            ezb_bdb_start_top_level_commissioning(EZB_BDB_MODE_NETWORK_STEERING);
+            ezb_bdb_close_network();
         } else {
-            ESP_LOGW(TAG, "Failed to form network with status(0x%02x)", status);
-            alarm_timer_schedule(esp_zigbee_alarm_bdb_commissioning, EZB_BDB_MODE_NETWORK_FORMATION, 1000);
-        }
-    } break;
-    case EZB_BDB_SIGNAL_STEERING: {
-        ezb_bdb_comm_status_t status = *((ezb_bdb_comm_status_t *)ezb_app_signal_get_params(app_signal));
-        if (status == EZB_BDB_STATUS_SUCCESS) {
-            ESP_LOGI(TAG, "Network steering completed");
-        } else {
-            ESP_LOGW(TAG, "Failed to steering network with status(0x%02x)", status);
+            ESP_LOGW(TAG, "Failed to join network with status(0x%02x)", status);
             alarm_timer_schedule(esp_zigbee_alarm_bdb_commissioning, EZB_BDB_MODE_NETWORK_STEERING, 1000);
         }
     } break;
-    case EZB_ZDO_SIGNAL_DEVICE_ANNCE: {
-        const ezb_zdo_signal_device_annce_params_t *dev_annce_params = ezb_app_signal_get_params(app_signal);
-        ESP_LOGI(TAG, "New device commissioned or rejoined(short: 0x%04hx)", dev_annce_params->short_addr);
+    case EZB_ZDO_SIGNAL_LEAVE: {
+        const ezb_zdo_signal_leave_params_t *leave_params = ezb_app_signal_get_params(app_signal);
+        ESP_LOGI(TAG, "Left network successfully with type(0x%02x)", leave_params->leave_type);
     } break;
     case EZB_NWK_SIGNAL_PERMIT_JOIN_STATUS: {
         uint8_t duration = *(uint8_t *)ezb_app_signal_get_params(app_signal);
@@ -104,70 +95,11 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
             ESP_LOGW(TAG, "Network(0x%04hx) closed, devices joining not allowed.", ezb_nwk_get_panid());
         }
     } break;
-    case EZB_ZDO_SIGNAL_LEAVE_INDICATION: {
-        const ezb_zdo_signal_leave_indication_params_t *leave_ind_params = ezb_app_signal_get_params(app_signal);
-        ESP_LOGI(TAG, "Zigbee Node(0x%04hx) is leaving network", leave_ind_params->short_addr);
-    } break;
     default:
-        ESP_LOGI(TAG, "Zigbee APP Signal: %s(type: 0x%02x)", ezb_app_signal_to_string(signal_type), signal_type);
+        ESP_LOGI(TAG, "Unhandled Zigbee APP Signal: %s(type: 0x%02x)", ezb_app_signal_to_string(signal_type), signal_type);
         break;
     }
     return true;
-}
-
-static void light_driver_set_on_off_attribute(const ezb_zcl_attribute_t *attribute)
-{
-    ESP_RETURN_ON_FALSE(attribute, , TAG, "attribute is invalid");
-    switch (attribute->id) {
-    case EZB_ZCL_ATTR_ON_OFF_ON_OFF_ID:
-        light_driver_set_power(*(uint8_t *)attribute->data.value);
-        ESP_LOGI(TAG, "Set On/Off: %d", *(uint8_t *)attribute->data.value);
-        break;
-    default:
-        ESP_LOGW(TAG, "Unsupported attribute ID(0x%04x)", attribute->id);
-        break;
-    }
-}
-
-static void light_driver_set_level_attribute(const ezb_zcl_attribute_t *attribute)
-{
-    ESP_RETURN_ON_FALSE(attribute, , TAG, "attribute is invalid");
-    switch (attribute->id) {
-    case EZB_ZCL_ATTR_LEVEL_CURRENT_LEVEL_ID:
-        light_driver_set_level(*(uint8_t *)attribute->data.value);
-        ESP_LOGI(TAG, "Set Level: %d", *(uint8_t *)attribute->data.value);
-        break;
-    default:
-        ESP_LOGW(TAG, "Unsupported attribute ID(0x%04x)", attribute->id);
-    }
-}
-
-static void light_driver_set_color_attribute(const ezb_zcl_attribute_t *attribute)
-{
-    static uint16_t cur_color_x = 0;
-    static uint16_t cur_color_y = 0;
-    static uint16_t new_color_x = 0;
-    static uint16_t new_color_y = 0;
-
-    ESP_RETURN_ON_FALSE(attribute, , TAG, "attribute is invalid");
-
-    switch (attribute->id) {
-    case EZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_X_ID:
-        new_color_x = *(uint16_t *)attribute->data.value;
-        break;
-    case EZB_ZCL_ATTR_COLOR_CONTROL_CURRENT_Y_ID:
-        new_color_y = *(uint16_t *)attribute->data.value;
-        break;
-    default:
-        ESP_LOGW(TAG, "Unsupported attribute ID(0x%04x)", attribute->id);
-        break;
-    }
-    if (new_color_x != cur_color_x || new_color_y != cur_color_y) {
-        light_driver_set_color_xy(new_color_x, new_color_y);
-        cur_color_x = new_color_x;
-        cur_color_y = new_color_y;
-        ESP_LOGI(TAG, "Set Color: 0x%04x, 0x%04x", cur_color_x, cur_color_y);
-    }
 }
 
 static void zcl_core_set_attr_value_handler(ezb_zcl_set_attr_value_message_t *message)
@@ -177,33 +109,28 @@ static void zcl_core_set_attr_value_handler(ezb_zcl_set_attr_value_message_t *me
              message->info.cluster_id, message->info.cluster_role == EZB_ZCL_CLUSTER_SERVER ? "server" : "client",
              message->info.status);
 
-    /* If this is an On/Off cluster targeted at our valve endpoints (11..21) route to valve driver */
-    if (message->info.cluster_id == EZB_ZCL_CLUSTER_ID_ON_OFF) {
+    switch (message->info.cluster_id) {
+    case EZB_ZCL_CLUSTER_ID_ON_OFF:
         uint8_t ep = message->info.dst_ep;
-        if (ep >= 11 && ep <= 21) {
+        if (ep >= ESP_ZIGBEE_HA_FIRST_EP_ID && ep <= ESP_ZIGBEE_HA_FIRST_EP_ID + ESP_ZIGBEE_HA_NB_EP - 1) {
             if (message->in.attribute.id == EZB_ZCL_ATTR_ON_OFF_ON_OFF_ID) {
                 uint8_t on = *(uint8_t *)message->in.attribute.data.value;
-                uint8_t valve_index = ep - 11; /* Valve 1 -> index 0 */
+                uint8_t valve_index = ep - ESP_ZIGBEE_HA_FIRST_EP_ID; /* Valve 1 -> index 0 */
+
+                color_light_color_t color = on ? COLOR_LIGHT_GREEN() : COLOR_LIGHT_RED();
+                light_driver_set_color(valve_index, color);
+
                 esp_err_t err = valve_driver_set_power(valve_index, on != 0);
                 if (err != ESP_OK) {
                     ESP_LOGW(TAG, "Failed to set valve %d state: %d", valve_index + 1, err);
                 }
                 ESP_LOGI(TAG, "Set Valve %d On/Off: %d", valve_index + 1, on);
                 return;
+            } else {
+                ESP_LOGW(TAG, "Unsupported attribute ID(0x%04x) for On/Off cluster", message->in.attribute.id);
+                return;
             }
-        } else {
-            /* non-valve endpoints use existing light handler */
-            light_driver_set_on_off_attribute(&message->in.attribute);
-            return;
         }
-    }
-
-    switch (message->info.cluster_id) {
-    case EZB_ZCL_CLUSTER_ID_LEVEL:
-        light_driver_set_level_attribute(&message->in.attribute);
-        break;
-    case EZB_ZCL_CLUSTER_ID_COLOR_CONTROL:
-        light_driver_set_color_attribute(&message->in.attribute);
         break;
     default:
         ESP_LOGW(TAG, "Unsupported cluster ID(0x%04x)", message->info.cluster_id);
@@ -229,50 +156,25 @@ static void esp_zigbee_zcl_core_action_handler(ezb_zcl_core_action_callback_id_t
 esp_err_t esp_zigbee_create_valve_devices(void)
 {
     ezb_af_device_desc_t dev_desc = ezb_af_create_device_desc();
-    ezb_zha_on_off_switch_config_t sw_cfg = EZB_ZHA_ON_OFF_SWITCH_CONFIG();
+    ezb_zha_mains_power_outlet_config_t outlet_cfg = EZB_ZHA_MAINS_POWER_OUTLET_CONFIG();
 
-    static char s_model_id[11][16];
-
-    for (uint8_t ep = 11; ep <= 21; ++ep) {
-        ezb_af_ep_desc_t ep_desc = ezb_zha_create_on_off_switch(ep, &sw_cfg);
+    for (uint8_t ep = ESP_ZIGBEE_HA_FIRST_EP_ID; ep <= ESP_ZIGBEE_HA_FIRST_EP_ID + ESP_ZIGBEE_HA_NB_EP - 1; ++ep) {
+        ESP_LOGI(TAG, "Creating valve device for endpoint %d...", ep);
+        ezb_af_ep_desc_t ep_desc = ezb_zha_create_mains_power_outlet(ep, &outlet_cfg);
         if (ep_desc == NULL) {
             ESP_LOGE(TAG, "Failed to create endpoint %d", ep);
             return ESP_FAIL;
         }
-
+ 
         ezb_zcl_cluster_desc_t basic_desc = ezb_af_endpoint_get_cluster_desc(ep_desc, EZB_ZCL_CLUSTER_ID_BASIC, EZB_ZCL_CLUSTER_SERVER);
         ezb_zcl_basic_cluster_desc_add_attr(basic_desc, EZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, (void *)ESP_MANUFACTURER_NAME);
-        /* Set model identifier to "Valve X" for clarity in Home Assistant */
-        snprintf(s_model_id[ep - 11], sizeof(s_model_id[0]), "Valve %d", ep - 10);
-        ezb_zcl_basic_cluster_desc_add_attr(basic_desc, EZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, (void *)s_model_id[ep - 11]);
-        /* Add a Multistate Input server cluster to report physical valve state as a 3-state value:
-         *  1 = Closed
-         *  2 = Opening
-         *  3 = Open
-         * This is exposed in a separate cluster so Home Assistant can observe physical state changes
-         * without changing the logical On/Off attribute behavior. */
-        ezb_zcl_multistate_input_cluster_server_config_t ms_cfg = {
-            .number_of_states = 3,
-            .out_of_service = false,
-            .present_value = 1, /* initial: Closed */
-            .status_flags = 0,
-        };
-        ezb_zcl_cluster_desc_t ms_desc = ezb_zcl_multistate_input_create_cluster_desc(&ms_cfg, EZB_ZCL_CLUSTER_SERVER);
-        if (ms_desc != NULL) {
-            ezb_err_t rc = ezb_af_endpoint_add_cluster_desc(ep_desc, ms_desc);
-            if (rc != EZB_ERR_NONE) {
-                ESP_LOGW(TAG, "Failed to attach MultistateInput cluster to endpoint %d: %d", ep, rc);
-            }
-        } else {
-            ESP_LOGW(TAG, "Failed to create MultistateInput cluster descriptor for endpoint %d", ep);
-        }
+        ezb_zcl_basic_cluster_desc_add_attr(basic_desc, EZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, (void *)ESP_MODEL_IDENTIFIER);
 
         ESP_ERROR_CHECK(ezb_af_device_add_endpoint_desc(dev_desc, ep_desc));
     }
 
     ESP_ERROR_CHECK(ezb_af_device_desc_register(dev_desc));
-
-    /* Register ZCL core action handler for attribute sets */
+    ESP_LOGI(TAG, "Reistering ZCL core action handler...");
     ezb_zcl_core_action_handler_register(esp_zigbee_zcl_core_action_handler);
 
     return ESP_OK;
@@ -284,27 +186,51 @@ esp_err_t esp_zigbee_setup_commissioning(void)
     ESP_ERROR_CHECK(ezb_bdb_set_primary_channel_set(ESP_ZIGBEE_PRIMARY_CHANNEL_MASK));
     ESP_ERROR_CHECK(ezb_bdb_set_secondary_channel_set(ESP_ZIGBEE_SECONDARY_CHANNEL_MASK));
     ESP_ERROR_CHECK(ezb_app_signal_add_handler(esp_zigbee_app_signal_handler));
-
     return ESP_OK;
 }
 
 static void esp_zigbee_stack_main_task(void *pvParameters)
 {
     esp_zigbee_config_t config = ESP_ZIGBEE_DEFAULT_CONFIG();
-
     ESP_ERROR_CHECK(esp_zigbee_init(&config));
-
     ESP_ERROR_CHECK(esp_zigbee_setup_commissioning());
-
     ESP_ERROR_CHECK(esp_zigbee_create_valve_devices());
-
     ESP_ERROR_CHECK(esp_zigbee_start(false));
-
     esp_zigbee_launch_mainloop();
-
     esp_zigbee_deinit();
-
     vTaskDelete(NULL);
+}
+
+
+
+void valve_changed_callback(uint8_t valve_index, valve_state_t new_state)
+{
+    color_light_color_t color;
+    switch (new_state) {
+    case VALVE_STATE_CLOSED:
+        ESP_LOGI(TAG, "Reporting valve %d state: Closed", valve_index + 1);
+        color = COLOR_LIGHT_RED();
+        light_driver_set_color(valve_index, color);
+        break;
+    case VALVE_STATE_OPENING:
+        ESP_LOGI(TAG, "Reporting valve %d state: Opening", valve_index + 1);
+        color = COLOR_LIGHT_YELLOW();
+        light_driver_set_color(valve_index, color);
+        break;
+    case VALVE_STATE_OPEN:
+        ESP_LOGI(TAG, "Reporting valve %d state: Open", valve_index + 1);
+        color = COLOR_LIGHT_GREEN();
+        light_driver_set_color(valve_index, color);
+        break;
+    case VALVE_STATE_PENDING:
+        ESP_LOGI(TAG, "Reporting valve %d state: Pending (queued to open)", valve_index + 1);
+        color = COLOR_LIGHT_BLUE();
+        light_driver_set_color(valve_index, color);
+        break;
+    default:
+        ESP_LOGW(TAG, "Reporting valve %d state: Unknown(%d)", valve_index + 1, new_state);
+        break;  
+    }
 }
 
 void app_main(void)
