@@ -15,12 +15,12 @@ Key behaviour
   `valve_driver_set_power(valve_index, on)`.
 - Physical actuation: GPIO outputs (active-high) with a per-valve state machine:
   `CLOSED`, `PENDING`, `OPENING`, `OPEN`.
-- Sequencing: at most `VALVE_MAX_CONCURRENT_OPENING` (currently hardcoded to `4` in
-  `main/valve_driver.c`) may be in `OPENING` concurrently.
+- Sequencing: at most `VALVE_MAX_CONCURRENT_OPENING` (default `4`, configured in
+  `main/valve_driver.h`) may be in `OPENING` concurrently.
   Additional open requests move the valve to `PENDING`. When a slot frees, the driver starts the
   lowest-index `PENDING` valve (not strict FIFO).
-- Timing: a valve remains `OPENING` for `VALVE_OPENING_MS` (currently `2 minutes`) and then
-  transitions to `OPEN` via a FreeRTOS software timer.
+- Timing: a valve remains `OPENING` for `VALVE_OPENING_MS` (default `2 minutes`, configured in
+  `main/valve_driver.h`) and then transitions to `OPEN` via a per-valve FreeRTOS software timer.
 
 State indication
 - The current firmware does *not* create/report a Multistate Input (or any other) cluster for the
@@ -71,7 +71,7 @@ Notes on transitions
 - CLOSED + open & capacity available -> OPENING: start GPIO, set timer, report using yellow LED.
 - CLOSED + open & capacity NOT available -> PENDING: record pending state, report using blue LED.
 - OPENING + timer expiry -> OPEN: set GPIO to final open, cancel timer, report using green LED.
-- OPENING + close request -> CLOSED: stop/delete timer, set GPIO low, and if a `PENDING` valve exists
+- OPENING + close request -> CLOSED: stop the per-valve timer, set GPIO low, and if a `PENDING` valve exists
   it is immediately started (`PENDING -> OPENING`). LED indication: closed valve becomes red; any started
   pending valve becomes yellow.
 - PENDING + slot becomes available -> OPENING: chosen by lowest index, start GPIO and timer, report using yellow LED.
@@ -92,5 +92,4 @@ Commissioning/runtime flow (as implemented)
 
 Troubleshooting
 - If a timer callback runs after a valve was closed, the driver ignores that callback rather
-  than transitioning the valve twice.
-
+  than transitioning the valve twice. (Timers are stopped on close; timers are not deleted at runtime.)

@@ -17,8 +17,19 @@ extern "C" {
 
 #define VALVE_COUNT 11
 
-/* Placeholder GPIO mapping for valves 0..10 (Valve 1..11).
- * Replace -1 with actual GPIO numbers. Negative values mean "not configured".
+/* Sequencing/timing configuration.
+ * These can be overridden at build time (e.g. via compiler defines).
+ */
+#ifndef VALVE_OPENING_MS
+#define VALVE_OPENING_MS (2 * 60 * 1000) /* 2 minutes */
+#endif
+
+#ifndef VALVE_MAX_CONCURRENT_OPENING
+#define VALVE_MAX_CONCURRENT_OPENING 4
+#endif
+
+/* GPIO mapping for valves 0..10 (Valve 1..11).
+ * Negative values mean "not configured".
  */
 #define VALVE_GPIO_0  10
 #define VALVE_GPIO_1  11

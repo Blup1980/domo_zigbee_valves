@@ -1,13 +1,11 @@
 /*
  * Simple valve driver using GPIO outputs.
  * Active-high polarity assumed (GPIO=1 opens valve).
- * Placeholder GPIOs are defined in valve_driver.h; negative values are treated as unconfigured.
+ * GPIO mappings are defined in valve_driver.h; negative values are treated as unconfigured.
  */
 
-#include <stdio.h>
-#include <stdlib.h>
 #include <stdbool.h>
-#include <string.h>
+#include <stdint.h>
 
 #include "esp_err.h"
 #include "esp_log.h"
@@ -18,9 +16,6 @@
 #include "freertos/timers.h"
 
 #include "valve_driver.h"
-/* Zigbee API for attribute updates and reporting */
-#include "esp_zigbee.h"
-#include "light_driver.h"
 
 static const char *TAG = "valve_driver";
 
@@ -58,11 +53,8 @@ static bool find_lowest_pending(uint8_t *out_idx)
     return false;
 }
 
-/* constants */
-#define VALVE_OPENING_MS (2 * 60 * 1000) /* 2 minutes */
-#define VALVE_MAX_CONCURRENT_OPENING 4
-
-static void pending_enqueue(uint8_t idx)
+/* Requires s_lock held. */
+static void pending_enqueue_locked(uint8_t idx)
 {
     /* mark valve as pending if it's currently closed (avoid duplicates) */
     if (idx >= VALVE_COUNT) return;
@@ -73,11 +65,69 @@ static void pending_enqueue(uint8_t idx)
     }
 }
 
+/* Start (or restart) the one-shot opening timer. Requires s_lock held. */
+static esp_err_t arm_opening_timer_locked(uint8_t idx)
+{
+    if (idx >= VALVE_COUNT || s_valve_timer[idx] == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    /* Best-effort stop; timer might already be stopped. */
+    (void)xTimerStop(s_valve_timer[idx], 0);
+    if (xTimerChangePeriod(s_valve_timer[idx], pdMS_TO_TICKS(VALVE_OPENING_MS), 0) != pdPASS) {
+        return ESP_FAIL;
+    }
+    if (xTimerStart(s_valve_timer[idx], 0) != pdPASS) {
+        return ESP_FAIL;
+    }
+    return ESP_OK;
+}
+
+/* Try to start exactly one pending valve (lowest index). Requires s_lock held. */
+static void try_start_one_pending_locked(void)
+{
+    while (count_opening() < VALVE_MAX_CONCURRENT_OPENING) {
+        uint8_t next_idx;
+        if (!find_lowest_pending(&next_idx)) {
+            return;
+        }
+
+        int next_gpio = s_valve_gpios[next_idx];
+        if (next_gpio < 0) {
+            /* Misconfiguration: can't actuate. Clear pending so it doesn't block the queue. */
+            ESP_LOGW(TAG, "Valve %u pending but GPIO not configured; dropping request", (unsigned)(next_idx + 1));
+            s_valve_state[next_idx] = VALVE_STATE_CLOSED;
+            valve_changed_callback(next_idx, VALVE_STATE_CLOSED);
+            continue;
+        }
+
+        esp_err_t err = gpio_set_level(next_gpio, 1);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Valve %u: gpio_set_level(%d,1) failed: %s", (unsigned)(next_idx + 1), next_gpio, esp_err_to_name(err));
+            /* Keep it pending; caller can retry via later transitions. */
+            return;
+        }
+
+        s_valve_state[next_idx] = VALVE_STATE_OPENING;
+        if (arm_opening_timer_locked(next_idx) != ESP_OK) {
+            ESP_LOGW(TAG, "Valve %u: failed to arm opening timer", (unsigned)(next_idx + 1));
+            /* Roll back to pending so it can be retried. */
+            s_valve_state[next_idx] = VALVE_STATE_PENDING;
+            return;
+        }
+
+        ESP_LOGI(TAG, "Started opening pending valve %u. Opening count=%d", (unsigned)(next_idx + 1), count_opening());
+        valve_changed_callback(next_idx, VALVE_STATE_OPENING);
+        return;
+    }
+}
+
 
 static void finish_opening(TimerHandle_t timer)
 {
-    uint32_t idx = (uint32_t)pvTimerGetTimerID(timer);
-    if (idx >= VALVE_COUNT) return;
+    uintptr_t idx_raw = (uintptr_t)pvTimerGetTimerID(timer);
+    if (idx_raw >= VALVE_COUNT) return;
+    uint8_t idx = (uint8_t)idx_raw;
 
     xSemaphoreTake(s_lock, portMAX_DELAY);
     /* If the valve is no longer in OPENING state (eg. it was closed and the timer
@@ -89,25 +139,17 @@ static void finish_opening(TimerHandle_t timer)
     }
 
     int gpio = s_valve_gpios[idx];
-    if (gpio >= 0) gpio_set_level(gpio, 1); /* ensure open */
+    if (gpio >= 0) {
+        esp_err_t err = gpio_set_level(gpio, 1); /* ensure open */
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Valve %u: gpio_set_level(%d,1) failed: %s", (unsigned)(idx + 1), gpio, esp_err_to_name(err));
+        }
+    }
     s_valve_state[idx] = VALVE_STATE_OPEN;
     ESP_LOGI(TAG, "Valve %d finished opening (now OPEN). Opening count=%d", idx + 1, count_opening());
 
     /* start next pending if any (choose lowest index) */
-    uint8_t next_idx;
-    if (count_opening() < VALVE_MAX_CONCURRENT_OPENING && find_lowest_pending(&next_idx)) {
-        int next_gpio = s_valve_gpios[next_idx];
-        if (next_gpio >= 0) gpio_set_level(next_gpio, 1); /* start power-hungry transition */
-        s_valve_state[next_idx] = VALVE_STATE_OPENING;
-        /* start/arm timer for next_idx */
-        if (s_valve_timer[next_idx] == NULL) {
-            s_valve_timer[next_idx] = xTimerCreate("valve_timer", pdMS_TO_TICKS(VALVE_OPENING_MS), pdFALSE, (void *)((uintptr_t)next_idx), finish_opening);
-        }
-        xTimerStart(s_valve_timer[next_idx], 0);
-        ESP_LOGI(TAG, "Started opening pending valve %d. Opening count=%d", next_idx + 1, count_opening());
-        /* report opening state for the started valve */
-        valve_changed_callback(next_idx, VALVE_STATE_OPENING);
-    }
+    try_start_one_pending_locked();
     valve_changed_callback(idx, VALVE_STATE_OPEN);
     xSemaphoreGive(s_lock);
 }
@@ -132,6 +174,12 @@ esp_err_t valve_driver_init(bool default_open)
 {
     populate_gpio_table();
 
+    /* initialize sequencing primitives first (callbacks may call back into the driver) */
+    s_lock = xSemaphoreCreateMutex();
+    if (s_lock == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+
     gpio_config_t io_conf = {
         .mode = GPIO_MODE_OUTPUT,
         .intr_type = GPIO_INTR_DISABLE,
@@ -142,9 +190,17 @@ esp_err_t valve_driver_init(bool default_open)
     for (int i = 0; i < VALVE_COUNT; ++i) {
         int gpio = s_valve_gpios[i];
         s_valve_state[i] = default_open ? VALVE_STATE_OPEN : VALVE_STATE_CLOSED;
-        s_valve_timer[i] = NULL;
+
+        /* Create one timer per valve; we stop/start it as needed (no deletes during runtime). */
+        s_valve_timer[i] = xTimerCreate("valve_timer", pdMS_TO_TICKS(VALVE_OPENING_MS), pdFALSE, (void *)((uintptr_t)i), finish_opening);
+        if (s_valve_timer[i] == NULL) {
+            ESP_LOGE(TAG, "Failed to create timer for valve %d", i + 1);
+            return ESP_ERR_NO_MEM;
+        }
+
         if (gpio < 0) {
-            ESP_LOGW(TAG, "Valve %d: GPIO not configured (placeholder)", i + 1);
+            ESP_LOGW(TAG, "Valve %d: GPIO not configured", i + 1);
+            valve_changed_callback(i, default_open ? VALVE_STATE_OPEN : VALVE_STATE_CLOSED);
             continue;
         }
 
@@ -166,9 +222,6 @@ esp_err_t valve_driver_init(bool default_open)
         valve_changed_callback(i, default_open ? VALVE_STATE_OPEN : VALVE_STATE_CLOSED);
     }
 
-    /* initialize sequencing primitives */
-    s_lock = xSemaphoreCreateMutex();
-
     return ESP_OK;
 }
 
@@ -182,40 +235,39 @@ esp_err_t valve_driver_set_power(uint8_t valve_index, bool on)
         ESP_LOGW(TAG, "Valve %d: GPIO not configured, cannot set state", valve_index + 1);
         return ESP_ERR_INVALID_STATE;
     }
+    if (s_lock == NULL) {
+        return ESP_ERR_INVALID_STATE;
+    }
     xSemaphoreTake(s_lock, portMAX_DELAY);
     if (!on) {
         /* Close immediately (instantaneous) and cancel any opening */
+        bool was_opening = (s_valve_state[valve_index] == VALVE_STATE_OPENING);
         /* remove pending state if set */
-        if (s_valve_state[valve_index] == VALVE_STATE_PENDING) s_valve_state[valve_index] = VALVE_STATE_CLOSED;
+        if (s_valve_state[valve_index] == VALVE_STATE_PENDING) {
+            s_valve_state[valve_index] = VALVE_STATE_CLOSED;
+        }
         if (s_valve_timer[valve_index] != NULL) {
-            xTimerStop(s_valve_timer[valve_index], 0);
-            xTimerDelete(s_valve_timer[valve_index], 0);
-            s_valve_timer[valve_index] = NULL;
+            (void)xTimerStop(s_valve_timer[valve_index], 0);
         }
         /* If the valve was opening
          * then we should attempt to start a queued valve to fill the freed slot.
          */
-        if (s_valve_state[valve_index] == VALVE_STATE_OPENING) {
-            /* set it to closed so we don't count it as in opening state anymore for the total count */
-            s_valve_state[valve_index] = VALVE_STATE_CLOSED;
-            uint8_t next_idx;
-            if (count_opening() < VALVE_MAX_CONCURRENT_OPENING && find_lowest_pending(&next_idx)) {
-                int next_gpio = s_valve_gpios[next_idx];
-                if (next_gpio >= 0) gpio_set_level(next_gpio, 1);
-                s_valve_state[next_idx] = VALVE_STATE_OPENING;
-                if (s_valve_timer[next_idx] == NULL) {
-                    s_valve_timer[next_idx] = xTimerCreate("valve_timer", pdMS_TO_TICKS(VALVE_OPENING_MS), pdFALSE, (void *)((uintptr_t)next_idx), finish_opening);
-                }
-                xTimerStart(s_valve_timer[next_idx], 0);
-                ESP_LOGI(TAG, "Started opening pending valve %d (from close). Opening count=%d", next_idx + 1, count_opening());
-                valve_changed_callback(next_idx, VALVE_STATE_OPENING);
-            }
-        }
+        /* set it to closed so we don't count it as OPENING anymore */
         s_valve_state[valve_index] = VALVE_STATE_CLOSED;
-        gpio_set_level(gpio, 0);
+
+        esp_err_t err = gpio_set_level(gpio, 0);
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Valve %u: gpio_set_level(%d,0) failed: %s", (unsigned)(valve_index + 1), gpio, esp_err_to_name(err));
+        }
         ESP_LOGI(TAG, "Valve %d -> CLOSED (immediate). Opening count=%d", valve_index + 1, count_opening());
         /* Report physical state: 1 = Closed */
         valve_changed_callback(valve_index, VALVE_STATE_CLOSED);
+
+        if (was_opening) {
+            /* Closing an opening valve frees a slot: start one queued valve if any. */
+            try_start_one_pending_locked();
+        }
+
         xSemaphoreGive(s_lock);
         return ESP_OK;
     }
@@ -229,22 +281,32 @@ esp_err_t valve_driver_set_power(uint8_t valve_index, bool on)
 
     /* If we have capacity, start opening immediately (count via states) */
     if (count_opening() < VALVE_MAX_CONCURRENT_OPENING) {
-        gpio_set_level(gpio, 1); /* start power-hungry transition */
+        esp_err_t err = gpio_set_level(gpio, 1); /* start power-hungry transition */
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "Valve %u: gpio_set_level(%d,1) failed: %s", (unsigned)(valve_index + 1), gpio, esp_err_to_name(err));
+            xSemaphoreGive(s_lock);
+            return err;
+        }
         s_valve_state[valve_index] = VALVE_STATE_OPENING;
         /* Report physical state: 2 = Opening */
         valve_changed_callback(valve_index, VALVE_STATE_OPENING);
-        /* create or start timer to finish opening */
-        if (s_valve_timer[valve_index] == NULL) {
-            s_valve_timer[valve_index] = xTimerCreate("valve_timer", pdMS_TO_TICKS(VALVE_OPENING_MS), pdFALSE, (void *)((uintptr_t)valve_index), finish_opening);
+        /* start timer to finish opening */
+        if (arm_opening_timer_locked(valve_index) != ESP_OK) {
+            /* Roll back to CLOSED to avoid getting stuck in OPENING without a timer. */
+            ESP_LOGW(TAG, "Valve %u: failed to arm opening timer", (unsigned)(valve_index + 1));
+            s_valve_state[valve_index] = VALVE_STATE_CLOSED;
+            (void)gpio_set_level(gpio, 0);
+            valve_changed_callback(valve_index, VALVE_STATE_CLOSED);
+            xSemaphoreGive(s_lock);
+            return ESP_FAIL;
         }
-        xTimerStart(s_valve_timer[valve_index], 0);
         ESP_LOGI(TAG, "Started opening valve %d. Opening count=%d", valve_index + 1, count_opening());
         xSemaphoreGive(s_lock);
         return ESP_OK;
     }
 
     /* Otherwise enqueue request and return success; HA sees immediate attribute accept */
-    pending_enqueue(valve_index);
+    pending_enqueue_locked(valve_index);
     ESP_LOGI(TAG, "Valve %d open request queued (concurrent limit reached).", valve_index + 1);
     xSemaphoreGive(s_lock);
     return ESP_OK;
