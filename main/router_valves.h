@@ -17,7 +17,7 @@
 #define ESP_MANUFACTURER_NAME "\x09""ESPRESSIF"
 #define ESP_MODEL_IDENTIFIER "\x05""VALVE"
 
-#define ESP_ZIGBEE_ZC_CONFIG()                           \
+#define ESP_ZIGBEE_ROUTER_CONFIG()                       \
     {                                                    \
         .device_type = EZB_NWK_DEVICE_TYPE_ROUTER,       \
         .install_code_policy = false,                    \
@@ -36,6 +36,6 @@
 
 #define ESP_ZIGBEE_DEFAULT_CONFIG()                      \
     {                                                    \
-        .device_config = ESP_ZIGBEE_ZC_CONFIG(),         \
+        .device_config = ESP_ZIGBEE_ROUTER_CONFIG(),     \
         .platform_config = ESP_ZIGBEE_PLATFORM_CONFIG(), \
     };
