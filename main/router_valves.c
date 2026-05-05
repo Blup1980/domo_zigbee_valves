@@ -117,9 +117,6 @@ static void zcl_core_set_attr_value_handler(ezb_zcl_set_attr_value_message_t *me
                 uint8_t on = *(uint8_t *)message->in.attribute.data.value;
                 uint8_t valve_index = ep - ESP_ZIGBEE_HA_FIRST_EP_ID; /* Valve 1 -> index 0 */
 
-                color_light_color_t color = on ? COLOR_LIGHT_GREEN() : COLOR_LIGHT_RED();
-                light_driver_set_color(valve_index, color);
-
                 esp_err_t err = valve_driver_set_power(valve_index, on != 0);
                 if (err != ESP_OK) {
                     ESP_LOGW(TAG, "Failed to set valve %d state: %d", valve_index + 1, err);

@@ -28,7 +28,7 @@ static int s_valve_gpios[VALVE_COUNT];
 
 /* runtime state */
 static valve_state_t s_valve_state[VALVE_COUNT];
-static TimerHandle_t  s_valve_timer[VALVE_COUNT]; /* timer used to finish opening after 3 minutes */
+static TimerHandle_t  s_valve_timer[VALVE_COUNT]; /* timer used to finish opening after VALVE_OPENING_MS */
 static SemaphoreHandle_t s_lock;
 
 /* Helper: count valves in OPENING state (no separate counter to avoid sync issues) */
@@ -68,7 +68,7 @@ static void pending_enqueue(uint8_t idx)
     if (idx >= VALVE_COUNT) return;
     if (s_valve_state[idx] == VALVE_STATE_CLOSED) {
         s_valve_state[idx] = VALVE_STATE_PENDING;
-        /* report pending as 'Opening' in Multistate Input so HA sees activity */
+        /* notify application (LED/status indication, etc.) */
         valve_changed_callback(idx, VALVE_STATE_PENDING);
     }
 }

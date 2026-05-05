@@ -1,8 +1,9 @@
 /*
- * Valve driver - placeholder GPIO mappings
+ * Valve driver - GPIO mappings
  *
  * Configure the VALVE_GPIO_x defines to the actual GPIO numbers for your board.
- * By default they are set to -1 as placeholders. Update them before flashing.
+ * Any negative value is treated as "not configured" and the driver will refuse
+ * to actuate that valve.
  */
 
 #pragma once
@@ -42,7 +43,7 @@ typedef enum {
  * @brief Initialize valve driver and configure GPIOs.
  *
  * @param default_open If true set valves open (GPIO=1 for active-high), otherwise closed.
- * @return ESP_OK on success (even if some GPIOs are placeholders), error code otherwise.
+ * @return ESP_OK on success (even if some GPIOs are not configured), error code otherwise.
  */
 esp_err_t valve_driver_init(bool default_open);
 
