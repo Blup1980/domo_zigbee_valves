@@ -87,7 +87,6 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
             ezb_nwk_get_extended_panid(&extended_pan_id);
             ESP_LOGI(TAG, "Joined network successfully: PAN ID(0x%04hx, EXT: 0x%llx), Channel(%d), Short Address(0x%04hx)",
                      ezb_nwk_get_panid(), extended_pan_id.u64, ezb_nwk_get_current_channel(), ezb_nwk_get_short_address());
-            ezb_bdb_close_network();
         } else {
             ESP_LOGW(TAG, "Failed to join network with status(0x%02x)", status);
             alarm_timer_schedule(esp_zigbee_alarm_bdb_commissioning, EZB_BDB_MODE_NETWORK_STEERING, 1000);
@@ -173,7 +172,15 @@ static void esp_zigbee_zcl_core_action_handler(ezb_zcl_core_action_callback_id_t
 esp_err_t esp_zigbee_create_valve_devices(void)
 {
     ezb_af_device_desc_t dev_desc = ezb_af_create_device_desc();
-    ezb_zha_mains_power_outlet_config_t outlet_cfg = EZB_ZHA_MAINS_POWER_OUTLET_CONFIG();
+    ezb_af_node_power_desc_t power_desc = {
+        .current_power_mode = 0,         /* always in full power mode */
+        .available_power_sources = EZB_AF_NODE_POWER_SOURCE_CONSTANT_POWER, /* mains power available */
+        .current_power_source = EZB_AF_NODE_POWER_SOURCE_CONSTANT_POWER,    /* currently using mains power */
+        .current_power_source_level = 0, /* n/a for mains */
+    };
+    ESP_ERROR_CHECK(ezb_af_set_node_power_desc(&power_desc));
+
+    ezb_zha_mains_power_outlet_config_t outlet_cfg = EZB_CUSTOM_POWER_OUTLET_CONFIG();
 
     for (uint8_t ep = ESP_ZIGBEE_HA_FIRST_EP_ID; ep <= ESP_ZIGBEE_HA_FIRST_EP_ID + ESP_ZIGBEE_HA_NB_EP - 1; ++ep) {
         ESP_LOGI(TAG, "Creating valve device for endpoint %d...", ep);
