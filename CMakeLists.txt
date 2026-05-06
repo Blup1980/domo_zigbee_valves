@@ -6,4 +6,4 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 set(COMPONENTS main)
 
-project(ha-coordinator-valves)
+project(ha-router-valves)
