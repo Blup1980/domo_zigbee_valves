@@ -8,7 +8,8 @@ Summary
 
 Key behaviour
 - 11 valves (`VALVE_COUNT = 11`) mapped to endpoints `10..20` (`ESP_ZIGBEE_HA_FIRST_EP_ID=10`).
-- Each endpoint is created as a ZHA "mains power outlet" device via `ezb_zha_create_mains_power_outlet()`.
+- Each endpoint is created as a ZHA "mains power outlet" device via `ezb_zha_create_mains_power_outlet()`. The
+  device identity attributes (manufacturer/model) are set only on the first endpoint.
 - Logical control: ZCL SetAttributeValue handling for the On/Off cluster (`EZB_ZCL_CLUSTER_ID_ON_OFF`)
   and the On/Off attribute (`EZB_ZCL_ATTR_ON_OFF_ON_OFF_ID`). The handler maps
   `endpoint -> valve_index` with `valve_index = ep - ESP_ZIGBEE_HA_FIRST_EP_ID` and calls

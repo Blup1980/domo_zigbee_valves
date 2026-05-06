@@ -61,6 +61,8 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
         ezb_bdb_start_top_level_commissioning(EZB_BDB_MODE_INITIALIZATION);
         break;
     case EZB_BDB_SIGNAL_DEVICE_FIRST_START:
+        ESP_LOGI(TAG, "Device first startup");
+        /* no break, continue to reboot handling */
     case EZB_BDB_SIGNAL_DEVICE_REBOOT: {
         ezb_bdb_comm_status_t status = *((ezb_bdb_comm_status_t *)ezb_app_signal_get_params(app_signal));
         if (status == EZB_BDB_STATUS_SUCCESS) {
@@ -73,7 +75,10 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
             if (ezb_bdb_is_factory_new()) {
                 ezb_bdb_start_top_level_commissioning(EZB_BDB_MODE_NETWORK_STEERING);
             } else {
-                ESP_LOGI(TAG, "Device reboot");
+                ezb_extpanid_t extended_pan_id;
+                ezb_nwk_get_extended_panid(&extended_pan_id);
+                ESP_LOGI(TAG, "Already joined network: PAN ID(0x%04hx, EXT: 0x%llx), Channel(%d), Short Address(0x%04hx)",
+                         ezb_nwk_get_panid(), extended_pan_id.u64, ezb_nwk_get_current_channel(), ezb_nwk_get_short_address());
             }
         } else {
             ESP_LOGW(TAG, "%s failed with status(0x%02x), retry again", ezb_app_signal_to_string(signal_type), status);
@@ -91,10 +96,6 @@ static bool esp_zigbee_app_signal_handler(const ezb_app_signal_t *app_signal)
             ESP_LOGW(TAG, "Failed to join network with status(0x%02x)", status);
             alarm_timer_schedule(esp_zigbee_alarm_bdb_commissioning, EZB_BDB_MODE_NETWORK_STEERING, 1000);
         }
-    } break;
-    case EZB_ZDO_SIGNAL_LEAVE: {
-        const ezb_zdo_signal_leave_params_t *leave_params = ezb_app_signal_get_params(app_signal);
-        ESP_LOGI(TAG, "Left network successfully with type(0x%02x)", leave_params->leave_type);
     } break;
     case EZB_NWK_SIGNAL_PERMIT_JOIN_STATUS: {
         uint8_t duration = *(uint8_t *)ezb_app_signal_get_params(app_signal);
@@ -190,12 +191,14 @@ esp_err_t esp_zigbee_create_valve_devices(void)
             return ESP_FAIL;
         }
 
-        ezb_zcl_cluster_desc_t basic_desc = ezb_af_endpoint_get_cluster_desc(ep_desc, EZB_ZCL_CLUSTER_ID_BASIC, EZB_ZCL_CLUSTER_SERVER);
-        if (basic_desc) {
-            ezb_zcl_basic_cluster_desc_add_attr(basic_desc, EZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, (void *)ESP_MANUFACTURER_NAME);
-            ezb_zcl_basic_cluster_desc_add_attr(basic_desc, EZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, (void *)ESP_MODEL_IDENTIFIER);
-        } else {
-            ESP_LOGW(TAG, "Endpoint %u missing Basic cluster; manufacturer/model not set", (unsigned)ep);
+        if (ep == ESP_ZIGBEE_HA_FIRST_EP_ID) {
+            ezb_zcl_cluster_desc_t basic_desc = ezb_af_endpoint_get_cluster_desc(ep_desc, EZB_ZCL_CLUSTER_ID_BASIC, EZB_ZCL_CLUSTER_SERVER);
+            if (basic_desc) {
+                ezb_zcl_basic_cluster_desc_add_attr(basic_desc, EZB_ZCL_ATTR_BASIC_MANUFACTURER_NAME_ID, (void *)ESP_MANUFACTURER_NAME);
+                ezb_zcl_basic_cluster_desc_add_attr(basic_desc, EZB_ZCL_ATTR_BASIC_MODEL_IDENTIFIER_ID, (void *)ESP_MODEL_IDENTIFIER);
+            } else {
+                ESP_LOGW(TAG, "Endpoint %u missing Basic cluster; manufacturer/model not set for primary endpoint", (unsigned)ep);
+            }
         }
 
         ESP_ERROR_CHECK(ezb_af_device_add_endpoint_desc(dev_desc, ep_desc));
